@@ -121,6 +121,12 @@ pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
 /// Returns the path to the configuration directory used by Zed.
 pub fn config_dir() -> &'static PathBuf {
     CONFIG_DIR.get_or_init(|| {
+        if let Ok(custom_dir) = std::env::var("ZED_CONFIG_DIR") {
+            let path = PathBuf::from(custom_dir);
+            if path.exists() || std::fs::create_dir_all(&path).is_ok() {
+                return path;
+            }
+        }
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
             custom_dir.join("config")
         } else if cfg!(target_os = "windows") {
@@ -143,6 +149,12 @@ pub fn config_dir() -> &'static PathBuf {
 /// Returns the path to the data directory used by Zed.
 pub fn data_dir() -> &'static PathBuf {
     CURRENT_DATA_DIR.get_or_init(|| {
+        if let Ok(custom_dir) = std::env::var("ZED_DATA_DIR") {
+            let path = PathBuf::from(custom_dir);
+            if path.exists() || std::fs::create_dir_all(&path).is_ok() {
+                return path;
+            }
+        }
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
             custom_dir.clone()
         } else if cfg!(target_os = "macos") {
@@ -169,6 +181,12 @@ pub fn data_dir() -> &'static PathBuf {
 pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
     STATE_DIR.get_or_init(|| {
+        if let Ok(custom_dir) = std::env::var("ZED_STATE_DIR") {
+            let path = PathBuf::from(custom_dir);
+            if path.exists() || std::fs::create_dir_all(&path).is_ok() {
+                return path;
+            }
+        }
         if cfg!(target_os = "macos") {
             return home_dir().join(".local").join("state").join(APP_NAME);
         }
@@ -193,6 +211,12 @@ pub fn state_dir() -> &'static PathBuf {
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEMP_DIR.get_or_init(|| {
+        if let Ok(custom_dir) = std::env::var("ZED_CACHE_DIR") {
+            let path = PathBuf::from(custom_dir);
+            if path.exists() || std::fs::create_dir_all(&path).is_ok() {
+                return path;
+            }
+        }
         if cfg!(target_os = "macos") {
             return dirs::cache_dir()
                 .expect("failed to determine cachesDirectory directory")
