@@ -1,315 +1,517 @@
-name: Build and Release
-
+# Generated from xtask::workflows::release
+# Rebuild with `cargo xtask workflows`.
+name: release
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
 on:
   push:
     tags:
-      - 'v*'
+      - v*
   workflow_dispatch:
     inputs:
-      build_linux:
-        description: 'Build for Linux'
-        type: boolean
-        default: true
-      build_macos:
-        description: 'Build for macOS'
-        type: boolean
-        default: true
-      build_windows:
-        description: 'Build for Windows'
-        type: boolean
-        default: true
-      build_type:
-        description: 'Build type'
-        type: choice
-        options:
-          - release
-          - debug
-        default: 'release'
-      custom_flags:
-        description: 'Custom cargo build flags'
+      release_tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: true
         type: string
-        default: ''
-      create_release:
-        description: 'Create GitHub Release'
+      skip_tests:
+        description: 'Skip tests (not recommended)'
+        required: false
         type: boolean
         default: false
-      release_tag:
-        description: 'Release tag (if create_release is true)'
+      build_platforms:
+        description: 'Platforms to build (comma-separated)'
+        required: false
         type: string
-        default: 'manual-build'
+        default: 'linux-x86_64,linux-aarch64,mac-aarch64,mac-x86_64,windows-x86_64,windows-aarch64'
 
 jobs:
-  build-linux:
-    name: Build Zed for Linux
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' || inputs.build_linux == true
+  run_tests_mac:
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false)
+    runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
         with:
-          submodules: recursive
-          fetch-depth: 0
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
 
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+      - name: Setup cargo config
+        run: |
+          mkdir -p ./../.cargo
+          cp ./.cargo/ci-config.toml ./../.cargo/config.toml
 
-      - name: Cache cargo registry
-        uses: actions/cache@v3
+      - name: Cache rust dependencies
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
-      - name: Install dependencies
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run tests
+        run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
+
+      - name: Cleanup cargo config
+        if: always()
+        run: rm -rf ./../.cargo
+    timeout-minutes: 60
+
+  run_tests_linux:
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Setup cargo config
+        run: |
+          mkdir -p ./../.cargo
+          cp ./.cargo/ci-config.toml ./../.cargo/config.toml
+
+      - name: Cache rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup Linux dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
-            libssl-dev libxcb-render-util0-dev libxcb-util-dev \
-            libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-cursor-dev \
-            libxcb-xinerama0-dev libxcb-randr0-dev libxcb-composite0-dev \
-            libx11-dev libxrandr-dev libxinerama-dev libxcomposite-dev \
-            libxcursor-dev
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libsoup2.4-dev \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            pkg-config \
+            clang
 
-      - name: Set build type
-        run: |
-          if [ "${{ inputs.build_type }}" = "debug" ]; then
-            echo "BUILD_FLAG=" >> $GITHUB_ENV
-            echo "BUILD_DIR=debug" >> $GITHUB_ENV
-          else
-            echo "BUILD_FLAG=--release" >> $GITHUB_ENV
-            echo "BUILD_DIR=release" >> $GITHUB_ENV
-          fi
-        shell: bash
-
-      - name: Get version
-        id: get_version
-        run: |
-          if [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          else
-            VERSION="${{ inputs.release_tag }}-$(date +'%Y%m%d-%H%M%S')"
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Build Zed
-        run: cargo build ${{ env.BUILD_FLAG }} ${{ inputs.custom_flags }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          name: zed-linux-${{ steps.get_version.outputs.VERSION }}
-          path: target/${{ env.BUILD_DIR }}/zed
-          retention-days: 30
+          node-version: '20'
 
-      - name: Prepare release assets
-        if: github.event_name == 'push' || inputs.create_release == true
-        run: |
-          mkdir -p release
-          cp target/${{ env.BUILD_DIR }}/zed release/zed-linux
-          chmod +x release/zed-linux
-          
-          cat > release/README.md << EOF
-          # Zed Custom Build - ${{ steps.get_version.outputs.VERSION }}
-          
-          ## Environment Variables Support
-          - \`ZED_CONFIG_DIR\` - Custom config directory
-          - \`ZED_DATA_DIR\` - Custom data directory
-          - \`ZED_CACHE_DIR\` - Custom cache directory
-          
-          ## Usage
-          \`\`\`bash
-          export ZED_CONFIG_DIR=/custom/config/path
-          export ZED_DATA_DIR=/custom/data/path
-          export ZED_CACHE_DIR=/custom/cache/path
-          ./zed-linux
-          \`\`\`
-          EOF
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        if: (github.event_name == 'push' || inputs.create_release == true) && github.event_name != 'workflow_dispatch'
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
         with:
-          tag_name: ${{ steps.get_version.outputs.VERSION }}
-          name: Release ${{ steps.get_version.outputs.VERSION }}
-          files: release/zed-linux
-          generate_release_notes: true
+          tool: cargo-nextest
 
-  build-macos:
-    name: Build Zed for macOS
-    runs-on: macos-latest
-    if: github.event_name == 'push' || inputs.build_macos == true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
+      - name: Run tests
+        run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
 
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+      - name: Cleanup cargo config
+        if: always()
+        run: rm -rf ./../.cargo
+    timeout-minutes: 60
 
-      - name: Cache cargo registry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Install dependencies
-        run: |
-          brew update
-          brew install cmake pkg-config
-
-      - name: Set build type
-        run: |
-          if [ "${{ inputs.build_type }}" = "debug" ]; then
-            echo "BUILD_FLAG=" >> $GITHUB_ENV
-            echo "BUILD_DIR=debug" >> $GITHUB_ENV
-          else
-            echo "BUILD_FLAG=--release" >> $GITHUB_ENV
-            echo "BUILD_DIR=release" >> $GITHUB_ENV
-          fi
-        shell: bash
-
-      - name: Get version
-        id: get_version
-        run: |
-          if [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          else
-            VERSION="${{ inputs.release_tag }}-$(date +'%Y%m%d-%H%M%S')"
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Build Zed
-        run: cargo build ${{ env.BUILD_FLAG }} ${{ inputs.custom_flags }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zed-macos-${{ steps.get_version.outputs.VERSION }}
-          path: target/${{ env.BUILD_DIR }}/zed
-          retention-days: 30
-
-      - name: Prepare release assets
-        if: github.event_name == 'push' || inputs.create_release == true
-        run: |
-          mkdir -p release
-          cp target/${{ env.BUILD_DIR }}/zed release/zed-macos
-          chmod +x release/zed-macos
-          
-          cat > release/README.md << 'EOF'
-          # Zed Custom Build for macOS
-          
-          ## Environment Variables Support
-          - `ZED_CONFIG_DIR` - Custom config directory
-          - `ZED_DATA_DIR` - Custom data directory
-          - `ZED_CACHE_DIR` - Custom cache directory
-          EOF
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        if: (github.event_name == 'push' || inputs.create_release == true) && github.event_name != 'workflow_dispatch'
-        with:
-          tag_name: ${{ steps.get_version.outputs.VERSION }}
-          name: Release ${{ steps.get_version.outputs.VERSION }}
-          files: release/zed-macos
-          generate_release_notes: true
-
-  build-windows:
-    name: Build Zed for Windows
+  run_tests_windows:
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false)
     runs-on: windows-latest
-    if: github.event_name == 'push' || inputs.build_windows == true
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
         with:
-          submodules: recursive
-          fetch-depth: 0
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
 
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+      - name: Setup cargo config
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "./../.cargo" -Force
+          Copy-Item -Path "./.cargo/ci-config.toml" -Destination "./../.cargo/config.toml"
 
-      - name: Cache cargo registry
-        uses: actions/cache@v3
+      - name: Cache rust dependencies
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
-      - name: Set build type
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run tests
+        shell: pwsh
+        run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
+
+      - name: Cleanup cargo config
+        if: always()
+        shell: pwsh
         run: |
-          if ("${{ inputs.build_type }}" -eq "debug") {
-            echo "BUILD_FLAG=" >> $env:GITHUB_ENV
-            echo "BUILD_DIR=debug" >> $env:GITHUB_ENV
-          } else {
-            echo "BUILD_FLAG=--release" >> $env:GITHUB_ENV
-            echo "BUILD_DIR=release" >> $env:GITHUB_ENV
-          }
-        shell: powershell
+          Remove-Item -Recurse -Path "./../.cargo" -Force -ErrorAction SilentlyContinue
+    timeout-minutes: 60
 
-      - name: Get version
-        id: get_version
+  clippy:
+    needs: [run_tests_linux]
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Setup Linux dependencies
         run: |
-          if ("${{ github.event_name }}" -eq "push" -and "${{ github.ref }}" -like "refs/tags/*") {
-            $VERSION = "${{ github.ref }}".Replace("refs/tags/", "")
-          } else {
-            $VERSION = "${{ inputs.release_tag }}-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-          }
-          echo "VERSION=$VERSION" >> $env:GITHUB_OUTPUT
-        shell: powershell
+          sudo apt-get update
+          sudo apt-get install -y \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            pkg-config \
+            clang
 
-      - name: Build Zed
-        run: cargo build ${{ env.BUILD_FLAG }} ${{ inputs.custom_flags }}
-        shell: bash
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+    timeout-minutes: 60
 
-      - name: Upload artifact
+  create_draft_release:
+    needs: [run_tests_linux, clippy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Determine release tag
+        id: determine_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.determine_tag.outputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo="$GITHUB_REPOSITORY" \
+            --draft \
+            --title="$RELEASE_TAG" \
+            --generate-notes
+    timeout-minutes: 60
+
+  bundle_linux_x86_64:
+    needs: [create_draft_release]
+    if: contains(github.event.inputs.build_platforms || 'linux-x86_64', 'linux-x86_64')
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Setup Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libsoup2.4-dev \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            pkg-config \
+            clang
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package release
+        run: |
+          mkdir -p release
+          cp target/release/zed release/ 2>/dev/null || true
+          cp target/release/zed-remote-server release/ 2>/dev/null || true
+          tar -czf zed-linux-x86_64.tar.gz -C release .
+          gzip -c release/zed-remote-server > zed-remote-server-linux-x86_64.gz 2>/dev/null || true
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zed-windows-${{ steps.get_version.outputs.VERSION }}
-          path: target/${{ env.BUILD_DIR }}/zed.exe
-          retention-days: 30
+          name: zed-linux-x86_64.tar.gz
+          path: zed-linux-x86_64.tar.gz
 
-      - name: Prepare release assets
-        if: github.event_name == 'push' || inputs.create_release == true
-        run: |
-          mkdir release
-          copy target\${{ env.BUILD_DIR }}\zed.exe release\zed-windows.exe
-          
-          @"
-          # Zed Custom Build for Windows
-          
-          ## Environment Variables Support
-          - `ZED_CONFIG_DIR` - Custom config directory
-          - `ZED_DATA_DIR` - Custom data directory
-          - `ZED_CACHE_DIR` - Custom cache directory
-          "@ > release\README.md
-        shell: powershell
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        if: (github.event_name == 'push' || inputs.create_release == true) && github.event_name != 'workflow_dispatch'
+      - name: Upload remote server
+        if: success()
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.get_version.outputs.VERSION }}
-          name: Release ${{ steps.get_version.outputs.VERSION }}
-          files: release/zed-windows.exe
-          generate_release_notes: true
+          name: zed-remote-server-linux-x86_64.gz
+          path: zed-remote-server-linux-x86_64.gz
+    timeout-minutes: 60
+
+  bundle_linux_aarch64:
+    needs: [create_draft_release]
+    if: contains(github.event.inputs.build_platforms || 'linux-aarch64', 'linux-aarch64')
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Setup cross-compilation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            pkg-config \
+            crossbuild-essential-arm64
+
+      - name: Build release
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          cargo build --release --target aarch64-unknown-linux-gnu
+
+      - name: Package release
+        run: |
+          mkdir -p release
+          cp target/aarch64-unknown-linux-gnu/release/zed release/ 2>/dev/null || true
+          cp target/aarch64-unknown-linux-gnu/release/zed-remote-server release/ 2>/dev/null || true
+          tar -czf zed-linux-aarch64.tar.gz -C release .
+          gzip -c release/zed-remote-server > zed-remote-server-linux-aarch64.gz 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-linux-aarch64.tar.gz
+          path: zed-linux-aarch64.tar.gz
+
+      - name: Upload remote server
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-remote-server-linux-aarch64.gz
+          path: zed-remote-server-linux-aarch64.gz
+    timeout-minutes: 60
+
+  bundle_mac_x86_64:
+    needs: [create_draft_release]
+    if: contains(github.event.inputs.build_platforms || 'mac-x86_64', 'mac-x86_64')
+    runs-on: macos-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Build release
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Package release
+        run: |
+          mkdir -p release
+          cp target/x86_64-apple-darwin/release/zed release/ 2>/dev/null || true
+          cp target/x86_64-apple-darwin/release/zed-remote-server release/ 2>/dev/null || true
+          gzip -c release/zed-remote-server > zed-remote-server-macos-x86_64.gz 2>/dev/null || true
+
+      - name: Upload remote server
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-remote-server-macos-x86_64.gz
+          path: zed-remote-server-macos-x86_64.gz
+    timeout-minutes: 60
+
+  bundle_mac_aarch64:
+    needs: [create_draft_release]
+    if: contains(github.event.inputs.build_platforms || 'mac-aarch64', 'mac-aarch64')
+    runs-on: macos-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Build release
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Package release
+        run: |
+          mkdir -p release
+          cp target/aarch64-apple-darwin/release/zed release/ 2>/dev/null || true
+          cp target/aarch64-apple-darwin/release/zed-remote-server release/ 2>/dev/null || true
+          gzip -c release/zed-remote-server > zed-remote-server-macos-aarch64.gz 2>/dev/null || true
+
+      - name: Upload remote server
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-remote-server-macos-aarch64.gz
+          path: zed-remote-server-macos-aarch64.gz
+    timeout-minutes: 60
+
+  bundle_windows_x86_64:
+    needs: [create_draft_release]
+    if: contains(github.event.inputs.build_platforms || 'windows-x86_64', 'windows-x86_64')
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Build release
+        shell: pwsh
+        run: cargo build --release
+
+      - name: Package release
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/release/zed-remote-server.exe -DestinationPath zed-remote-server-windows-x86_64.zip
+
+      - name: Upload remote server
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-remote-server-windows-x86_64.zip
+          path: zed-remote-server-windows-x86_64.zip
+    timeout-minutes: 60
+
+  bundle_windows_aarch64:
+    needs: [create_draft_release]
+    if: contains(github.event.inputs.build_platforms || 'windows-aarch64', 'windows-aarch64')
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Build release
+        shell: pwsh
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+      - name: Package release
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/aarch64-pc-windows-msvc/release/zed-remote-server.exe -DestinationPath zed-remote-server-windows-aarch64.zip
+
+      - name: Upload remote server
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-remote-server-windows-aarch64.zip
+          path: zed-remote-server-windows-aarch64.zip
+    timeout-minutes: 60
+
+  upload_release_assets:
+    needs:
+      - create_draft_release
+      - bundle_linux_aarch64
+      - bundle_linux_x86_64
+      - bundle_mac_aarch64
+      - bundle_mac_x86_64
+      - bundle_windows_aarch64
+      - bundle_windows_x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts/
+
+      - name: Display structure of artifacts
+        run: ls -lR ./artifacts
+
+      - name: Determine release tag
+        id: determine_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.determine_tag.outputs.tag }}
+        run: |
+          find ./artifacts -type f -name "*.tar.gz" -o -name "*.gz" -o -name "*.zip" -o -name "*.dmg" | while read asset; do
+            echo "Uploading $asset..."
+            gh release upload "$RELEASE_TAG" "$asset" --repo="$GITHUB_REPOSITORY" --clobber
+          done
+    timeout-minutes: 30
+
+  publish_release:
+    needs: [upload_release_assets]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine release tag
+        id: determine_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.determine_tag.outputs.tag }}
+        run: |
+          gh release edit "$RELEASE_TAG" --repo="$GITHUB_REPOSITORY" --draft=false
+    timeout-minutes: 30
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
