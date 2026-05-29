@@ -1,9 +1,8 @@
-# Generated from xtask::workflows::release
-# Rebuild with `cargo xtask workflows`.
 name: release
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
+
 on:
   push:
     tags:
@@ -20,28 +19,53 @@ on:
         type: boolean
         default: false
       build_platforms:
-        description: 'Platforms to build (comma-separated)'
+        description: 'Platforms to build (comma-separated: linux-x86_64,linux-aarch64,mac-aarch64,mac-x86_64,windows-x86_64,windows-aarch64)'
         required: false
         type: string
         default: 'linux-x86_64,linux-aarch64,mac-aarch64,mac-x86_64,windows-x86_64,windows-aarch64'
 
 jobs:
+  validate_tag:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Validate tag exists
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          if ! git tag -l "$RELEASE_TAG" | grep -q "$RELEASE_TAG"; then
+            echo "❌ Error: Tag '$RELEASE_TAG' does not exist in the repository"
+            echo "Available tags:"
+            git tag -l
+            exit 1
+          fi
+          echo "✅ Tag '$RELEASE_TAG' found"
+
   run_tests_mac:
+    needs: [validate_tag]
     if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false)
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false && always())
     runs-on: macos-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Setup cargo config
         run: |
           mkdir -p ./../.cargo
-          cp ./.cargo/ci-config.toml ./../.cargo/config.toml
+          if [ -f ./.cargo/ci-config.toml ]; then
+            cp ./.cargo/ci-config.toml ./../.cargo/config.toml
+          fi
 
       - name: Cache rust dependencies
         uses: actions/cache@v4
@@ -50,7 +74,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: mac-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -71,21 +95,24 @@ jobs:
     timeout-minutes: 60
 
   run_tests_linux:
+    needs: [validate_tag]
     if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false)
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false && always())
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Setup cargo config
         run: |
           mkdir -p ./../.cargo
-          cp ./.cargo/ci-config.toml ./../.cargo/config.toml
+          if [ -f ./.cargo/ci-config.toml ]; then
+            cp ./.cargo/ci-config.toml ./../.cargo/config.toml
+          fi
 
       - name: Cache rust dependencies
         uses: actions/cache@v4
@@ -94,7 +121,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup Linux dependencies
         run: |
@@ -127,22 +154,25 @@ jobs:
     timeout-minutes: 60
 
   run_tests_windows:
+    needs: [validate_tag]
     if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false)
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_tests == false && always())
     runs-on: windows-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Setup cargo config
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "./../.cargo" -Force
-          Copy-Item -Path "./.cargo/ci-config.toml" -Destination "./../.cargo/config.toml"
+          if (Test-Path "./.cargo/ci-config.toml") {
+            Copy-Item -Path "./.cargo/ci-config.toml" -Destination "./../.cargo/config.toml"
+          }
 
       - name: Cache rust dependencies
         uses: actions/cache@v4
@@ -151,7 +181,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -184,8 +214,8 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Setup Linux dependencies
         run: |
@@ -201,26 +231,39 @@ jobs:
     timeout-minutes: 60
 
   create_draft_release:
-    needs: [run_tests_linux, clippy]
+    needs: [run_tests_linux, run_tests_mac, run_tests_windows, clippy]
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && always())
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           fetch-depth: 0
-          ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-tags: true
 
       - name: Determine release tag
         id: determine_tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+            TAG="${{ github.event.inputs.release_tag }}"
           else
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            TAG="${{ github.ref_name }}"
           fi
+          
+          # Check if tag already has a release
+          if gh release view "$TAG" --repo="$GITHUB_REPOSITORY" &>/dev/null; then
+            echo "⚠️ Release for $TAG already exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Create draft release
+        if: steps.determine_tag.outputs.exists == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.determine_tag.outputs.tag }}
@@ -230,11 +273,14 @@ jobs:
             --draft \
             --title="$RELEASE_TAG" \
             --generate-notes
+          
+          echo "✅ Draft release created for $RELEASE_TAG"
     timeout-minutes: 60
 
   bundle_linux_x86_64:
     needs: [create_draft_release]
-    if: contains(github.event.inputs.build_platforms || 'linux-x86_64', 'linux-x86_64')
+    if: |
+      contains(github.event.inputs.build_platforms || 'linux-x86_64,linux-aarch64,mac-aarch64,mac-x86_64,windows-x86_64,windows-aarch64', 'linux-x86_64')
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
@@ -242,8 +288,8 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Setup Linux dependencies
         run: |
@@ -258,33 +304,45 @@ jobs:
             clang
 
       - name: Build release
-        run: cargo build --release
+        run: |
+          cargo build --release
 
       - name: Package release
         run: |
-          mkdir -p release
-          cp target/release/zed release/ 2>/dev/null || true
-          cp target/release/zed-remote-server release/ 2>/dev/null || true
-          tar -czf zed-linux-x86_64.tar.gz -C release .
-          gzip -c release/zed-remote-server > zed-remote-server-linux-x86_64.gz 2>/dev/null || true
+          mkdir -p release-artifacts
+          # Copy binaries if they exist
+          for bin in zed zed-remote-server; do
+            if [ -f "target/release/$bin" ]; then
+              cp "target/release/$bin" release-artifacts/
+            fi
+          done
+          
+          # Create archive
+          if [ "$(ls -A release-artifacts)" ]; then
+            tar -czf zed-linux-x86_64.tar.gz -C release-artifacts .
+            
+            # Create remote server archive
+            if [ -f release-artifacts/zed-remote-server ]; then
+              gzip -c release-artifacts/zed-remote-server > zed-remote-server-linux-x86_64.gz
+            fi
+          else
+            echo "⚠️ No binaries found to package"
+            exit 1
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zed-linux-x86_64.tar.gz
-          path: zed-linux-x86_64.tar.gz
-
-      - name: Upload remote server
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: zed-remote-server-linux-x86_64.gz
-          path: zed-remote-server-linux-x86_64.gz
+          name: zed-linux-x86_64
+          path: |
+            zed-linux-x86_64.tar.gz
+            zed-remote-server-linux-x86_64.gz
     timeout-minutes: 60
 
   bundle_linux_aarch64:
     needs: [create_draft_release]
-    if: contains(github.event.inputs.build_platforms || 'linux-aarch64', 'linux-aarch64')
+    if: |
+      contains(github.event.inputs.build_platforms || 'linux-x86_64,linux-aarch64,mac-aarch64,mac-x86_64,windows-x86_64,windows-aarch64', 'linux-aarch64')
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
@@ -292,8 +350,8 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Setup cross-compilation
         run: |
@@ -302,37 +360,49 @@ jobs:
             gcc-aarch64-linux-gnu \
             pkg-config \
             crossbuild-essential-arm64
+          
+          rustup target add aarch64-unknown-linux-gnu
 
       - name: Build release
         run: |
-          rustup target add aarch64-unknown-linux-gnu
           cargo build --release --target aarch64-unknown-linux-gnu
 
       - name: Package release
         run: |
-          mkdir -p release
-          cp target/aarch64-unknown-linux-gnu/release/zed release/ 2>/dev/null || true
-          cp target/aarch64-unknown-linux-gnu/release/zed-remote-server release/ 2>/dev/null || true
-          tar -czf zed-linux-aarch64.tar.gz -C release .
-          gzip -c release/zed-remote-server > zed-remote-server-linux-aarch64.gz 2>/dev/null || true
+          mkdir -p release-artifacts
+          # Copy binaries if they exist
+          for bin in zed zed-remote-server; do
+            if [ -f "target/aarch64-unknown-linux-gnu/release/$bin" ]; then
+              cp "target/aarch64-unknown-linux-gnu/release/$bin" release-artifacts/
+            fi
+          done
+          
+          # Create archive
+          if [ "$(ls -A release-artifacts)" ]; then
+            tar -czf zed-linux-aarch64.tar.gz -C release-artifacts .
+            
+            # Create remote server archive
+            if [ -f release-artifacts/zed-remote-server ]; then
+              gzip -c release-artifacts/zed-remote-server > zed-remote-server-linux-aarch64.gz
+            fi
+          else
+            echo "⚠️ No binaries found to package"
+            exit 1
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zed-linux-aarch64.tar.gz
-          path: zed-linux-aarch64.tar.gz
-
-      - name: Upload remote server
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: zed-remote-server-linux-aarch64.gz
-          path: zed-remote-server-linux-aarch64.gz
+          name: zed-linux-aarch64
+          path: |
+            zed-linux-aarch64.tar.gz
+            zed-remote-server-linux-aarch64.gz
     timeout-minutes: 60
 
   bundle_mac_x86_64:
     needs: [create_draft_release]
-    if: contains(github.event.inputs.build_platforms || 'mac-x86_64', 'mac-x86_64')
+    if: |
+      contains(github.event.inputs.build_platforms || 'linux-x86_64,linux-aarch64,mac-aarch64,mac-x86_64,windows-x86_64,windows-aarch64', 'mac-x86_64')
     runs-on: macos-latest
     env:
       CARGO_INCREMENTAL: 0
@@ -340,29 +410,35 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Build release
         run: cargo build --release --target x86_64-apple-darwin
 
       - name: Package release
         run: |
-          mkdir -p release
-          cp target/x86_64-apple-darwin/release/zed release/ 2>/dev/null || true
-          cp target/x86_64-apple-darwin/release/zed-remote-server release/ 2>/dev/null || true
-          gzip -c release/zed-remote-server > zed-remote-server-macos-x86_64.gz 2>/dev/null || true
+          mkdir -p release-artifacts
+          
+          if [ -f "target/x86_64-apple-darwin/release/zed-remote-server" ]; then
+            cp target/x86_64-apple-darwin/release/zed-remote-server release-artifacts/
+            gzip -c release-artifacts/zed-remote-server > zed-remote-server-macos-x86_64.gz
+          else
+            echo "⚠️ Remote server binary not found"
+            exit 1
+          fi
 
       - name: Upload remote server
         uses: actions/upload-artifact@v4
         with:
-          name: zed-remote-server-macos-x86_64.gz
+          name: zed-remote-server-macos-x86_64
           path: zed-remote-server-macos-x86_64.gz
     timeout-minutes: 60
 
   bundle_mac_aarch64:
     needs: [create_draft_release]
-    if: contains(github.event.inputs.build_platforms || 'mac-aarch64', 'mac-aarch64')
+    if: |
+      contains(github.event.inputs.build_platforms || 'linux-x86_64,linux-aarch64,mac-aarch64,mac-x86_64,windows-x86_64,windows-aarch64', 'mac-aarch64')
     runs-on: macos-latest
     env:
       CARGO_INCREMENTAL: 0
@@ -370,29 +446,35 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Build release
         run: cargo build --release --target aarch64-apple-darwin
 
       - name: Package release
         run: |
-          mkdir -p release
-          cp target/aarch64-apple-darwin/release/zed release/ 2>/dev/null || true
-          cp target/aarch64-apple-darwin/release/zed-remote-server release/ 2>/dev/null || true
-          gzip -c release/zed-remote-server > zed-remote-server-macos-aarch64.gz 2>/dev/null || true
+          mkdir -p release-artifacts
+          
+          if [ -f "target/aarch64-apple-darwin/release/zed-remote-server" ]; then
+            cp target/aarch64-apple-darwin/release/zed-remote-server release-artifacts/
+            gzip -c release-artifacts/zed-remote-server > zed-remote-server-macos-aarch64.gz
+          else
+            echo "⚠️ Remote server binary not found"
+            exit 1
+          fi
 
       - name: Upload remote server
         uses: actions/upload-artifact@v4
         with:
-          name: zed-remote-server-macos-aarch64.gz
+          name: zed-remote-server-macos-aarch64
           path: zed-remote-server-macos-aarch64.gz
     timeout-minutes: 60
 
   bundle_windows_x86_64:
     needs: [create_draft_release]
-    if: contains(github.event.inputs.build_platforms || 'windows-x86_64', 'windows-x86_64')
+    if: |
+      contains(github.event.inputs.build_platforms || 'linux-x86_64,linux-aarch64,mac-aarch64,mac-x86_64,windows-x86_64,windows-aarch64', 'windows-x86_64')
     runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: 0
@@ -400,8 +482,8 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Build release
         shell: pwsh
@@ -410,18 +492,24 @@ jobs:
       - name: Package release
         shell: pwsh
         run: |
-          Compress-Archive -Path target/release/zed-remote-server.exe -DestinationPath zed-remote-server-windows-x86_64.zip
+          if (Test-Path "target/release/zed-remote-server.exe") {
+            Compress-Archive -Path target/release/zed-remote-server.exe -DestinationPath zed-remote-server-windows-x86_64.zip
+          } else {
+            Write-Error "Remote server binary not found"
+            exit 1
+          }
 
       - name: Upload remote server
         uses: actions/upload-artifact@v4
         with:
-          name: zed-remote-server-windows-x86_64.zip
+          name: zed-remote-server-windows-x86_64
           path: zed-remote-server-windows-x86_64.zip
     timeout-minutes: 60
 
   bundle_windows_aarch64:
     needs: [create_draft_release]
-    if: contains(github.event.inputs.build_platforms || 'windows-aarch64', 'windows-aarch64')
+    if: |
+      contains(github.event.inputs.build_platforms || 'linux-x86_64,linux-aarch64,mac-aarch64,mac-x86_64,windows-x86_64,windows-aarch64', 'windows-aarch64')
     runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: 0
@@ -429,22 +517,29 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          clean: false
           ref: ${{ github.event.inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       - name: Build release
         shell: pwsh
-        run: cargo build --release --target aarch64-pc-windows-msvc
+        run: |
+          rustup target add aarch64-pc-windows-msvc
+          cargo build --release --target aarch64-pc-windows-msvc
 
       - name: Package release
         shell: pwsh
         run: |
-          Compress-Archive -Path target/aarch64-pc-windows-msvc/release/zed-remote-server.exe -DestinationPath zed-remote-server-windows-aarch64.zip
+          if (Test-Path "target/aarch64-pc-windows-msvc/release/zed-remote-server.exe") {
+            Compress-Archive -Path target/aarch64-pc-windows-msvc/release/zed-remote-server.exe -DestinationPath zed-remote-server-windows-aarch64.zip
+          } else {
+            Write-Error "Remote server binary not found"
+            exit 1
+          }
 
       - name: Upload remote server
         uses: actions/upload-artifact@v4
         with:
-          name: zed-remote-server-windows-aarch64.zip
+          name: zed-remote-server-windows-aarch64
           path: zed-remote-server-windows-aarch64.zip
     timeout-minutes: 60
 
@@ -463,9 +558,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts/
+          merge-multiple: true
 
       - name: Display structure of artifacts
-        run: ls -lR ./artifacts
+        run: |
+          echo "📁 Downloaded artifacts:"
+          find ./artifacts -type f -exec ls -lh {} \;
 
       - name: Determine release tag
         id: determine_tag
@@ -481,10 +579,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.determine_tag.outputs.tag }}
         run: |
-          find ./artifacts -type f -name "*.tar.gz" -o -name "*.gz" -o -name "*.zip" -o -name "*.dmg" | while read asset; do
-            echo "Uploading $asset..."
+          echo "🚀 Uploading assets to release $RELEASE_TAG..."
+          
+          find ./artifacts -type f \( -name "*.tar.gz" -o -name "*.gz" -o -name "*.zip" -o -name "*.dmg" \) | while read asset; do
+            echo "  Uploading: $asset"
             gh release upload "$RELEASE_TAG" "$asset" --repo="$GITHUB_REPOSITORY" --clobber
           done
+          
+          echo "✅ All assets uploaded successfully"
     timeout-minutes: 30
 
   publish_release:
@@ -505,11 +607,35 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.determine_tag.outputs.tag }}
         run: |
+          echo "📢 Publishing release $RELEASE_TAG..."
           gh release edit "$RELEASE_TAG" --repo="$GITHUB_REPOSITORY" --draft=false
+          echo "✅ Release $RELEASE_TAG is now public!"
     timeout-minutes: 30
 
+  notify:
+    needs: [publish_release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine release tag
+        id: determine_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summary
+        run: |
+          echo "## 🎉 Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag:** ${{ steps.determine_tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ needs.publish_release.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release URL:** ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.determine_tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.ref_name || github.event.inputs.release_tag }}
   cancel-in-progress: true
 
 defaults:
